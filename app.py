@@ -3,10 +3,27 @@
 import json
 import os
 import logging
+from typing import Any
+from decimal import Decimal
+import datetime
+from flask import Flask, Response, request, jsonify
 import requests
 import openai
-from flask import Flask, Response, request, jsonify
 from dotenv import load_dotenv
+from mysql.connector import MySQLConnection
+from mysql.connector.pooling import PooledMySQLConnection
+import mysql.connector
+
+
+class CustomEncoder(json.JSONEncoder):
+    """Define a custom JSON encoder to handle decimal and date values"""
+
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return str(o)
+        if isinstance(o, datetime.date):
+            return str(o)
+        return json.JSONEncoder.default(self, o)
 
 load_dotenv()
 
@@ -52,6 +69,10 @@ AZURE_OPENAI_STREAM = os.environ.get("AZURE_OPENAI_STREAM", "true")
 # Name of the model, e.g. 'gpt-35-turbo' or 'gpt-4'
 AZURE_OPENAI_MODEL_NAME = os.environ.get(
     "AZURE_OPENAI_MODEL_NAME", "gpt-35-turbo")
+MYSQL_HOST = os.environ.get("MYSQL_HOST")
+MYSQL_USERNAME = os.environ.get("MYSQL_USERNAME")
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
+MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
 
 SHOULD_STREAM = True if AZURE_OPENAI_STREAM.lower() == "true" else False
 
@@ -105,6 +126,7 @@ def prepare_body_headers_with_data(req):
     }
 
     chatgpt_url = f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/openai/deployments/{AZURE_OPENAI_MODEL}"
+
     if is_chat_model():
         chatgpt_url += "/chat/completions?api-version=2023-03-15-preview"
     else:
@@ -211,6 +233,52 @@ def stream_without_data(response):
         yield json.dumps(response_obj).replace("\n", "\\n") + "\n"
 
 
+def create_db_connection() -> (PooledMySQLConnection | MySQLConnection | Any):
+    """Create a database connection for MySQL"""
+    result = mysql.connector.connect(
+        host=os.getenv("MYSQL_HOST"),
+        user=os.getenv("MYSQL_USERNAME"),
+        password=os.getenv("MYSQL_PASSWORD"),
+        database=os.getenv("MYSQL_DATABASE"),
+        port=3306,
+        ssl_disabled=False
+    )
+
+    return result
+
+
+def get_results_as_json(sql_statement) -> str:
+    """Execute a query and get the results as JSON"""
+    db_connection = create_db_connection()
+    cursor = db_connection.cursor()
+    cursor.execute(sql_statement)
+    rows = cursor.fetchall()
+    db_connection.close()
+
+    return json.dumps(rows, cls=CustomEncoder)
+
+
+def create_system_messages(data) -> list[dict[str, str]]:
+    """Create the initial system prompt and examples"""
+    result = [
+        {"role": "system",
+         "content": f"""You are an AI data analytics assistant. The assistant is helpful, 
+            creative, clever, and very friendly.\nHere are two rows summarizing member information 
+            at the Cabana Club\n{data}\n"""},
+        {"role": "user", "content": "What columns does the data set contain?"},
+        {"role": "assistant",
+         "content": """Cabana Club membership data includes the columns member_gender, gender_display, gender_count, avg_income, avg_term. gender_count is the number of members of each gender. """},
+    ]
+
+    # member_id, 
+    # membership_number, membership_term_years, annual_fees, member_marital_status,
+    # member_gender, member_annual_income, member_occupation_cd, membership_package, 
+    # member_age_at_issue, additional_members, payment_mode, agent_code, membership_status, 
+    # start_date, and end_date.
+
+    return result
+
+
 def conversation_without_data(req):
     """Communicate with the API wihout search data"""
     openai.api_type = "azure"
@@ -218,24 +286,32 @@ def conversation_without_data(req):
     openai.api_version = "2023-03-15-preview"
     openai.api_key = AZURE_OPENAI_KEY
 
+    initial_data = get_results_as_json("""
+    SELECT 
+    CASE 
+        WHEN member_gender = 'M' THEN 'Male' 
+        WHEN member_gender = 'F' THEN 'Female' 
+        ELSE 'Not specified' 
+    END, member_gender, 
+    COUNT(*) AS gender_count,
+    AVG(member_annual_income) AS avg_income,
+    AVG(membership_term_years) AS avg_term
+    FROM member_data 
+    GROUP BY member_gender;
+    """)
+    chat_messages = create_system_messages(initial_data)
+
     request_messages = req.json["messages"]
 
-    messages = [
-        {
-            "role": "system",
-            "content": AZURE_OPENAI_SYSTEM_MESSAGE
-        }
-    ]
-
     for message in request_messages:
-        messages.append({
+        chat_messages.append({
             "role": message["role"],
             "content": message["content"]
         })
 
     response = openai.ChatCompletion.create(
         engine=AZURE_OPENAI_MODEL,
-        messages=messages,
+        messages=chat_messages,
         temperature=float(AZURE_OPENAI_TEMPERATURE),
         max_tokens=int(AZURE_OPENAI_MAX_TOKENS),
         top_p=float(AZURE_OPENAI_TOP_P),
@@ -273,8 +349,7 @@ def conversation():
         use_data = should_use_data()
         if use_data:
             return conversation_with_data(request)
-        else:
-            return conversation_without_data(request)
+        return conversation_without_data(request)
     # pylint: disable=broad-exception-caught
     except Exception as err:
         logging.exception("Exception in /conversation")
