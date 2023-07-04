@@ -25,6 +25,7 @@ class CustomEncoder(json.JSONEncoder):
             return str(o)
         return json.JSONEncoder.default(self, o)
 
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -69,6 +70,8 @@ AZURE_OPENAI_STREAM = os.environ.get("AZURE_OPENAI_STREAM", "true")
 # Name of the model, e.g. 'gpt-35-turbo' or 'gpt-4'
 AZURE_OPENAI_MODEL_NAME = os.environ.get(
     "AZURE_OPENAI_MODEL_NAME", "gpt-35-turbo")
+
+# MySQL Database Connection Variables
 MYSQL_HOST = os.environ.get("MYSQL_HOST")
 MYSQL_USERNAME = os.environ.get("MYSQL_USERNAME")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
@@ -267,11 +270,13 @@ def create_system_messages(data) -> list[dict[str, str]]:
             at the Cabana Club\n{data}\n"""},
         {"role": "user", "content": "What columns does the data set contain?"},
         {"role": "assistant",
-         "content": """Cabana Club membership data includes the columns member_gender, gender_display, gender_count, avg_income, avg_term. gender_count is the number of members of each gender. """},
+         "content": """Cabana Club membership data includes the columns member_gender,
+            gender_display, gender_count, avg_income, avg_term. gender_count is the number of
+            members of each gender. """},
     ]
 
-    # member_id, 
-    # membership_number, membership_term_years, annual_fees, member_marital_status,
+    # For reference, here is the full set of columns
+    # member_id, membership_number, membership_term_years, annual_fees, member_marital_status,
     # member_gender, member_annual_income, member_occupation_cd, membership_package, 
     # member_age_at_issue, additional_members, payment_mode, agent_code, membership_status, 
     # start_date, and end_date.
