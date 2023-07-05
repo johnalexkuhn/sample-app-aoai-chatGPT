@@ -1,5 +1,7 @@
 """Flask application serves React app and provides Open AI API access"""
 
+import csv
+import io
 import json
 import os
 import logging
@@ -62,8 +64,8 @@ AZURE_OPENAI_TEMPERATURE = os.environ.get("AZURE_OPENAI_TEMPERATURE", 0)
 AZURE_OPENAI_TOP_P = os.environ.get("AZURE_OPENAI_TOP_P", 1.0)
 AZURE_OPENAI_MAX_TOKENS = os.environ.get("AZURE_OPENAI_MAX_TOKENS", 1000)
 AZURE_OPENAI_STOP_SEQUENCE = os.environ.get("AZURE_OPENAI_STOP_SEQUENCE")
-AZURE_OPENAI_SYSTEM_MESSAGE = os.environ.get(
-    "AZURE_OPENAI_SYSTEM_MESSAGE", "You are an AI assistant that helps people find information.")
+# AZURE_OPENAI_SYSTEM_MESSAGE = os.environ.get(
+#     "AZURE_OPENAI_SYSTEM_MESSAGE", "You are an AI assistant that helps people find information.")
 AZURE_OPENAI_PREVIEW_API_VERSION = os.environ.get(
     "AZURE_OPENAI_PREVIEW_API_VERSION", "2023-06-01-preview")
 AZURE_OPENAI_STREAM = os.environ.get("AZURE_OPENAI_STREAM", "true")
@@ -78,11 +80,18 @@ MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
 
 SHOULD_STREAM = True if AZURE_OPENAI_STREAM.lower() == "true" else False
-
+CODE_BLOCK_DELIMITER = "```"
+AZURE_OPENAI_SYSTEM_MESSAGE = """You are an AI assistant that helps people write mysql queries about
+    membership data. My data table has the following columns: MEMBERSHIP_NUMBER,MEMBERSHIP_TERM_YEARS,
+    ANNUAL_FEES,MEMBER_MARITAL_STATUS,MEMBER_GENDER,MEMBER_ANNUAL_INCOME,MEMBER_OCCUPATION_CD,
+    MEMBERSHIP_PACKAGE,MEMBER_AGE_AT_ISSUE,ADDITIONAL_MEMBERS,PAYMENT_MODE,AGENT_CODE,MEMBERSHIP_STATUS,
+    START_DATE,END_DATE. The table name is member_data. Put the count after the group field."""
 
 def is_chat_model():
     """Determine if we are using Chat GPT model based on config settings"""
-    if 'gpt-4' in AZURE_OPENAI_MODEL_NAME.lower() or AZURE_OPENAI_MODEL_NAME.lower() in ['gpt-35-turbo-4k', 'gpt-35-turbo-16k']:
+    if 'gpt-4' in AZURE_OPENAI_MODEL_NAME.lower() or AZURE_OPENAI_MODEL_NAME.lower() in [
+        'gpt-35-turbo-4k', 'gpt-35-turbo-16k'
+    ]:
         return True
     return False
 
@@ -113,14 +122,18 @@ def prepare_body_headers_with_data(req):
                     "key": AZURE_SEARCH_KEY,
                     "indexName": AZURE_SEARCH_INDEX,
                     "fieldsMapping": {
+                        # pylint: disable=line-too-long
                         "contentField": AZURE_SEARCH_CONTENT_COLUMNS.split("|") if AZURE_SEARCH_CONTENT_COLUMNS else [],
                         "titleField": AZURE_SEARCH_TITLE_COLUMN if AZURE_SEARCH_TITLE_COLUMN else None,
                         "urlField": AZURE_SEARCH_URL_COLUMN if AZURE_SEARCH_URL_COLUMN else None,
+                        # pylint: disable=line-too-long
                         "filepathField": AZURE_SEARCH_FILENAME_COLUMN if AZURE_SEARCH_FILENAME_COLUMN else None
                     },
                     "inScope": True if AZURE_SEARCH_ENABLE_IN_DOMAIN.lower() == "true" else False,
                     "topNDocuments": AZURE_SEARCH_TOP_K,
+                    # pylint: disable=line-too-long
                     "queryType": "semantic" if AZURE_SEARCH_USE_SEMANTIC_SEARCH.lower() == "true" else "simple",
+                    # pylint: disable=line-too-long
                     "semanticConfiguration": AZURE_SEARCH_SEMANTIC_SEARCH_CONFIG if AZURE_SEARCH_USE_SEMANTIC_SEARCH.lower() == "true" and AZURE_SEARCH_SEMANTIC_SEARCH_CONFIG else "",
                     "roleInformation": AZURE_OPENAI_SYSTEM_MESSAGE
                 }
@@ -128,6 +141,7 @@ def prepare_body_headers_with_data(req):
         ]
     }
 
+    # pylint: disable=line-too-long
     chatgpt_url = f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/openai/deployments/{AZURE_OPENAI_MODEL}"
 
     if is_chat_model():
@@ -197,6 +211,7 @@ def stream_with_data(body, headers, endpoint):
 def conversation_with_data(req):
     """Create a conversation with data from event stream"""
     body, headers = prepare_body_headers_with_data(req)
+    # pylint: disable=line-too-long
     endpoint = f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/openai/deployments/{AZURE_OPENAI_MODEL}/extensions/chat/completions?api-version={AZURE_OPENAI_PREVIEW_API_VERSION}"
 
     if not SHOULD_STREAM:
@@ -208,8 +223,8 @@ def conversation_with_data(req):
 
     if req.method == "POST":
         return Response(stream_with_data(body, headers, endpoint), mimetype='text/event-stream')
-    else:
-        return Response(None, mimetype='text/event-stream')
+
+    return Response(None, mimetype='text/event-stream')
 
 
 def stream_without_data(response):
@@ -250,19 +265,40 @@ def create_db_connection() -> (PooledMySQLConnection | MySQLConnection | Any):
     return result
 
 
-def get_results_as_json(sql_statement) -> str:
-    """Execute a query and get the results as JSON"""
+def get_result_set(sql_statement):
+    """ Execute SQL and get result set """
     db_connection = create_db_connection()
     cursor = db_connection.cursor()
     cursor.execute(sql_statement)
     rows = cursor.fetchall()
     db_connection.close()
 
+    return rows
+
+
+def get_results_as_json(sql_statement) -> str:
+    """Execute a query and get the results as JSON"""
+    rows = get_result_set(sql_statement=sql_statement)
+
     return json.dumps(rows, cls=CustomEncoder)
 
 
-def create_system_messages(data) -> list[dict[str, str]]:
+def create_system_messages() -> list[dict[str, str]]:
     """Create the initial system prompt and examples"""
+    data = get_results_as_json("""
+    SELECT 
+    CASE 
+        WHEN member_gender = 'M' THEN 'Male' 
+        WHEN member_gender = 'F' THEN 'Female' 
+        ELSE 'Not specified' 
+    END, member_gender, 
+    COUNT(*) AS gender_count,
+    AVG(member_annual_income) AS avg_income,
+    AVG(membership_term_years) AS avg_term
+    FROM member_data 
+    GROUP BY member_gender;
+    """)
+
     result = [
         {"role": "system",
          "content": f"""You are an AI data analytics assistant. The assistant is helpful, 
@@ -277,9 +313,30 @@ def create_system_messages(data) -> list[dict[str, str]]:
 
     # For reference, here is the full set of columns
     # member_id, membership_number, membership_term_years, annual_fees, member_marital_status,
-    # member_gender, member_annual_income, member_occupation_cd, membership_package, 
-    # member_age_at_issue, additional_members, payment_mode, agent_code, membership_status, 
+    # member_gender, member_annual_income, member_occupation_cd, membership_package,
+    # member_age_at_issue, additional_members, payment_mode, agent_code, membership_status,
     # start_date, and end_date.
+
+    return result
+
+
+def contains_sql(content: str) -> str:
+    """ Determines if a string contains SQL statements """
+    result = False
+    if "SELECT" in content.upper():
+        result = True
+
+    return result
+
+
+def extract_query(content) -> str:
+    """ Extract a statement from a code block """
+    result = ""
+    start_index = content.find(CODE_BLOCK_DELIMITER)
+    end_index = content.find(CODE_BLOCK_DELIMITER, start_index + 3, len(content))
+
+    if start_index != -1 and end_index > start_index:
+        result = content[start_index + 3:end_index - 1].replace("\n", " ").strip()
 
     return result
 
@@ -291,21 +348,14 @@ def conversation_without_data(req):
     openai.api_version = "2023-03-15-preview"
     openai.api_key = AZURE_OPENAI_KEY
 
-    initial_data = get_results_as_json("""
-    SELECT 
-    CASE 
-        WHEN member_gender = 'M' THEN 'Male' 
-        WHEN member_gender = 'F' THEN 'Female' 
-        ELSE 'Not specified' 
-    END, member_gender, 
-    COUNT(*) AS gender_count,
-    AVG(member_annual_income) AS avg_income,
-    AVG(membership_term_years) AS avg_term
-    FROM member_data 
-    GROUP BY member_gender;
-    """)
-    chat_messages = create_system_messages(initial_data)
+    # chat_messages = create_system_messages()
+    chat_messages = []
 
+    chat_messages.append({
+        "role": "system",
+        "content": AZURE_OPENAI_SYSTEM_MESSAGE
+    })
+    
     request_messages = req.json["messages"]
 
     for message in request_messages:
@@ -321,11 +371,27 @@ def conversation_without_data(req):
         max_tokens=int(AZURE_OPENAI_MAX_TOKENS),
         top_p=float(AZURE_OPENAI_TOP_P),
         stop=AZURE_OPENAI_STOP_SEQUENCE.split(
-            "|") if AZURE_OPENAI_STOP_SEQUENCE else None,
-        stream=SHOULD_STREAM
+            "|") if AZURE_OPENAI_STOP_SEQUENCE else None
     )
 
-    if not SHOULD_STREAM:
+    # print(response)
+    response_content = response['choices'][0]['message']['content']
+
+    if contains_sql(response_content):
+        query = extract_query(response_content)
+        rows = get_result_set(query)
+
+        # Write the rows to a string
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerows(rows)
+
+        # Get the string value
+        csv_string = output.getvalue()
+
+        # pylint: disable: line-too-long
+        response['choices'][0]['message']['content'] = f"Here are the results you requested in CSV format:\n\n```{csv_string}```"
+
         response_obj = {
             "id": response,
             "model": response.model,
@@ -341,10 +407,10 @@ def conversation_without_data(req):
 
         return jsonify(response_obj), 200
 
-    if request.method == "POST":
-        return Response(stream_without_data(response), mimetype='text/event-stream')
-    else:
-        return Response(None, mimetype='text/event-stream')
+    # if request.method == "POST":
+    #     return Response(stream_without_data(response), mimetype='text/event-stream')
+
+    return Response(None, mimetype='text/event-stream')
 
 
 @app.route("/conversation", methods=["GET", "POST"])
