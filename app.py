@@ -227,13 +227,31 @@ def conversation_with_data(req):
     return Response(None, mimetype='text/event-stream')
 
 
-def stream_without_data(response):
+def get_query_result(content) -> str:
+    """ Extract query from content and execute on MySQL """
+    query = extract_query(content)
+    rows = get_result_set(query)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(rows)
+    result = output.getvalue()
+
+    return result
+
+
+def original_stream_without_data(response):
     """Stream a response without search data"""
     response_text = ""
     for line in response:
         delta_text = line["choices"][0]["delta"].get('content')
         if delta_text and delta_text != "[DONE]":
             response_text += delta_text
+
+        message_content = ""
+        if contains_sql(response_text):
+            message_content = get_query_result(response_text)
+        else:
+            message_content = response_text
 
         response_obj = {
             "id": line["id"],
@@ -243,7 +261,7 @@ def stream_without_data(response):
             "choices": [{
                 "messages": [{
                     "role": "assistant",
-                    "content": response_text
+                    "content": message_content
                 }]
             }]
         }
@@ -276,50 +294,6 @@ def get_result_set(sql_statement):
     return rows
 
 
-def get_results_as_json(sql_statement) -> str:
-    """Execute a query and get the results as JSON"""
-    rows = get_result_set(sql_statement=sql_statement)
-
-    return json.dumps(rows, cls=CustomEncoder)
-
-
-def create_system_messages() -> list[dict[str, str]]:
-    """Create the initial system prompt and examples"""
-    data = get_results_as_json("""
-    SELECT 
-    CASE 
-        WHEN member_gender = 'M' THEN 'Male' 
-        WHEN member_gender = 'F' THEN 'Female' 
-        ELSE 'Not specified' 
-    END, member_gender, 
-    COUNT(*) AS gender_count,
-    AVG(member_annual_income) AS avg_income,
-    AVG(membership_term_years) AS avg_term
-    FROM member_data 
-    GROUP BY member_gender;
-    """)
-
-    result = [
-        {"role": "system",
-         "content": f"""You are an AI data analytics assistant. The assistant is helpful, 
-            creative, clever, and very friendly.\nHere are two rows summarizing member information 
-            at the Cabana Club\n{data}\n"""},
-        {"role": "user", "content": "What columns does the data set contain?"},
-        {"role": "assistant",
-         "content": """Cabana Club membership data includes the columns member_gender,
-            gender_display, gender_count, avg_income, avg_term. gender_count is the number of
-            members of each gender. """},
-    ]
-
-    # For reference, here is the full set of columns
-    # member_id, membership_number, membership_term_years, annual_fees, member_marital_status,
-    # member_gender, member_annual_income, member_occupation_cd, membership_package,
-    # member_age_at_issue, additional_members, payment_mode, agent_code, membership_status,
-    # start_date, and end_date.
-
-    return result
-
-
 def contains_sql(content: str) -> str:
     """ Determines if a string contains SQL statements """
     result = False
@@ -341,6 +315,12 @@ def extract_query(content) -> str:
     return result
 
 
+def item_generator(items: list):
+    """Create a generator for a list of items"""
+    for item in items:
+        yield json.dumps(item).replace("\n", "\\n") + "\n"
+
+
 def conversation_without_data(req):
     """Communicate with the API wihout search data"""
     openai.api_type = "azure"
@@ -348,14 +328,12 @@ def conversation_without_data(req):
     openai.api_version = "2023-03-15-preview"
     openai.api_key = AZURE_OPENAI_KEY
 
-    # chat_messages = create_system_messages()
     chat_messages = []
-
     chat_messages.append({
         "role": "system",
         "content": AZURE_OPENAI_SYSTEM_MESSAGE
     })
-    
+
     request_messages = req.json["messages"]
 
     for message in request_messages:
@@ -374,41 +352,32 @@ def conversation_without_data(req):
             "|") if AZURE_OPENAI_STOP_SEQUENCE else None
     )
 
-    # print(response)
-    response_content = response['choices'][0]['message']['content']
+    content = response.choices[0].message.content
+    if contains_sql(content=content):
+        query_result = get_query_result(response.choices[0].message.content)
+        if query_result != "":
+            content = f"Here are the results of your inquiry:\n\n```{query_result}```\n"
+        else:
+            content = f"Unabled to run query, content was {response.choices[0].message.content}"
 
-    if contains_sql(response_content):
-        query = extract_query(response_content)
-        rows = get_result_set(query)
-
-        # Write the rows to a string
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerows(rows)
-
-        # Get the string value
-        csv_string = output.getvalue()
-
-        # pylint: disable: line-too-long
-        response['choices'][0]['message']['content'] = f"Here are the results you requested in CSV format:\n\n```{csv_string}```"
-
-        response_obj = {
-            "id": response,
-            "model": response.model,
-            "created": response.created,
-            "object": response.object,
-            "choices": [{
-                "messages": [{
-                    "role": "assistant",
-                    "content": response.choices[0].message.content
-                }]
+    response_obj = {
+        "id": response,
+        "model": response.model,
+        "created": response.created,
+        "object": response.object,
+        "choices": [{
+            "messages": [{
+                "role": "assistant",
+                "content": content
             }]
-        }
+        }]
+    }
 
-        return jsonify(response_obj), 200
+    response_list = []
+    response_list.append(response_obj)
 
-    # if request.method == "POST":
-    #     return Response(stream_without_data(response), mimetype='text/event-stream')
+    if request.method == "POST":
+        return Response(item_generator(response_list), mimetype='text/event-stream')
 
     return Response(None, mimetype='text/event-stream')
 
